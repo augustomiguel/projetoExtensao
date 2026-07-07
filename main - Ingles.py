@@ -7,11 +7,11 @@ from viagensIngles.reporting import ReportGenerator
 from viagensIngles.filtro import Filter
 
 # --- GLOBAL CONFIGURATION ---
-YEARS_TO_PROCESS = [2023, 2024, 2025]
+YEARS_TO_PROCESS = [2022, 2023, 2024, 2025]
 ORGS_TO_PROCESS = ['UFPB', 'UFCG']
 
 # Defines how many years at the START of the list will be used ONLY to calculate the baseline
-QTY_BASELINE_YEARS = 1
+QTY_BASELINE_YEARS = 2
 
 # --- EXECUTION CONTROL (Where you decide what runs) ---
 RUN_HEAVY_PROCESSING = True  
@@ -68,7 +68,7 @@ def execute_annual_flow():
     print("--- INITIALIZING GEOCODER (CACHE MANAGER) ---")
     geocoder = GeoCacheManager(user_agent="MySustainabilityProject/1.0")
 
-    # Identifies which are the baseline years (e.g., 2011 and 2012)
+    # Identifies which are the baseline years
     baseline_years = YEARS_TO_PROCESS[:QTY_BASELINE_YEARS]
 
     for year in YEARS_TO_PROCESS:
@@ -77,7 +77,7 @@ def execute_annual_flow():
         # Step 1: Fetch Data
         raw_data = step_fetch_data(year)
         
-        # Step 2: Process Master (Necessary to find distance and emissions)
+        # Step 2: Process Master
         if raw_data:
             step_process_general(year, raw_data, geocoder)
         else:
@@ -89,6 +89,12 @@ def execute_annual_flow():
         # Step 3: Reports per Institution
         for org in ORGS_TO_PROCESS:
             step_filter_and_report(year, org, is_baseline)
+            
+        # Step 4: Cross-Institutional Comparison
+        if not is_baseline:
+            print("\n--- 4. GENERATING CROSS-INSTITUTIONAL COMPARISON ---")
+            reporter = ReportGenerator(year=year)
+            reporter.generate_institutional_comparison(ORGS_TO_PROCESS)
 
 
 def execute_excel_consolidation():

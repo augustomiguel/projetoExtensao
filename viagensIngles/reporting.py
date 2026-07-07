@@ -5,7 +5,8 @@ import matplotlib.gridspec as gridspec
 import matplotlib.ticker as ticker
 import matplotlib.patches as patches
 from PyPDF2 import PdfMerger
-from viagens.metricas import MetricsCalculator
+import numpy as np
+from .metricas import MetricsCalculator
 
 class ReportGenerator:
     def __init__(self, year: int):
@@ -61,7 +62,9 @@ class ReportGenerator:
     def generate_consolidated_dashboard(self, org: str, baseline=None):
         print(f"🔄 Generating Full Consolidated Dashboard (Matplotlib) for {org}...")
         current_df = self._load_master_file(org)
-        if current_df.empty: return
+        if current_df.empty:
+            print("Null year {self.year}") 
+            return
 
         current_df['Emissions (KgCO2eq)'] = pd.to_numeric(current_df['Emissions (KgCO2eq)'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
         current_df['Valor passagens'] = pd.to_numeric(current_df['Valor passagens'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
@@ -190,7 +193,15 @@ class ReportGenerator:
             if os.path.exists(full_path): merger.append(full_path)
             merger.write(final_path)
             merger.close()
-        except Exception as e: print(f"   - ❌ Error merging PDFs: {e}")
+            
+            # --- LIMPEZA DOS ARQUIVOS TEMPORÁRIOS ---
+            for temp_file in [panel_path, monthly_path, full_path]:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            print(f"   🧹 Cleaned up temporary individual PDFs for {org}.")
+            
+        except Exception as e: 
+            print(f"   - ❌ Error merging PDFs: {e}")
 
     def generate_excel_matrix(self, org: str, selected_years: list):
         print(f"   📊 Generating Consolidated Excel Matrix for {org} (in Tonnes)...")
@@ -231,3 +242,137 @@ class ReportGenerator:
             writer.sheets['Data']['A1'] = f"Air travel displacement data - {org} (Emissions in Tonnes of CO2eq)"
             writer.sheets['Data']['A1'].font = __import__('openpyxl').styles.Font(size=14, bold=True)
         print(f"   ✅ Excel saved at: {os.path.abspath(excel_path)}")
+    
+    def generate_institutional_comparison(self, orgs: list):
+        print(f"🔄 Generating Full Cross-Institutional Comparison Dashboard for {self.year}...")
+        
+        # Coleta dados para todas as instituições
+        org_data = {}
+        year_factor = self.calculator.correction_factors.get(self.year, 1.0)
+        
+        # Descobre os anos de processamento dinamicamente lendo as pastas para o baseline
+        import glob
+        folders = glob.glob('travelData/travel_data*')
+        processing_years = sorted([int(f[-4:]) for f in folders if f[-4:].isdigit()])
+        if not processing_years:
+            processing_years = [2022, 2023, 2024, 2025] # Fallback de segurança
+            
+        for org in orgs:
+            df = self._load_master_file(org)
+            if df.empty:
+                continue
+                
+            # Conversão numérica e limpeza
+            df['Emissions (KgCO2eq)'] = pd.to_numeric(df['Emissions (KgCO2eq)'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
+            df['Valor passagens'] = pd.to_numeric(df['Valor passagens'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
+            df['Distance (GCD)'] = pd.to_numeric(df['Distance (GCD)'].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
+            
+            # Baseline e Scores
+            baseline = self.calculate_dynamic_baseline(org, processing_years)
+            scores = self.calculator.calculate_indicators_and_scores(df, baseline)
+            
+            # Agrupamentos
+            affil = df.groupby('Affiliation')['Emissions (KgCO2eq)'].sum().to_dict() if 'Affiliation' in df.columns else {}
+            dist_cat = df.groupby('Distance Category')['Distance (GCD)'].sum().to_dict() if 'Distance Category' in df.columns else {}
+            emiss_cat = df.groupby('Distance Category')['Emissions (KgCO2eq)'].sum().to_dict() if 'Distance Category' in df.columns else {}
+            
+            org_data[org] = {
+                'Expenses': df['Valor passagens'].sum() * year_factor,
+                'Emissions': df['Emissions (KgCO2eq)'].sum(),
+                'Scores': {k.replace('_Score', ''): v for k, v in scores.items() if k.endswith('_Score')},
+                'Affiliation': affil,
+                'Dist_Cat': dist_cat,
+                'Emiss_Cat': emiss_cat
+            }
+            
+        if not org_data:
+            print(f"   ⚠️ WARNING: Not enough data to compare institutions in {self.year}.")
+            return
+            
+        # ==========================================
+        # 1. GERAÇÃO DO DASHBOARD EM PDF
+        # ==========================================
+        fig = plt.figure(figsize=(18, 10), constrained_layout=True)
+        gs = gridspec.GridSpec(2, 3, figure=fig, width_ratios=[1, 1, 1.2])
+
+        ax_costs = fig.add_subplot(gs[0, 0])
+        ax_emissions = fig.add_subplot(gs[0, 1])
+        ax_scores = fig.add_subplot(gs[0, 2])
+        ax_affil = fig.add_subplot(gs[1, 0])
+        ax_cat_dist = fig.add_subplot(gs[1, 1])
+        ax_cat_emiss = fig.add_subplot(gs[1, 2])
+        
+        org_names = list(org_data.keys())
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+        
+        costs = [org_data[org]['Expenses'] for org in org_names]
+        ax_costs.bar(org_names, costs, color=colors[:len(org_names)], edgecolor='black')
+        ax_costs.set_title('Cost Comparison (2025 BRL)', fontweight='bold')
+        ax_costs.yaxis.set_major_formatter(ticker.StrMethodFormatter('R$ {x:,.0f}'))
+        
+        emissions = [org_data[org]['Emissions'] for org in org_names]
+        ax_emissions.bar(org_names, emissions, color=colors[:len(org_names)], edgecolor='black')
+        ax_emissions.set_title('Emissions Comparison', fontweight='bold')
+        ax_emissions.yaxis.set_major_formatter(ticker.StrMethodFormatter('{x:,.0f} kg'))
+        
+        def plot_grouped_bars(ax, data_dict, category_key, title, y_format=None):
+            all_cats = set()
+            for org in org_names:
+                all_cats.update(org_data[org][category_key].keys())
+            all_cats = sorted(list(all_cats))
+            if not all_cats: return
+            x_pos = np.arange(len(all_cats))
+            width = 0.8 / len(org_names)
+            for i, org in enumerate(org_names):
+                y_vals = [org_data[org][category_key].get(c, 0) for c in all_cats]
+                offset = (i - len(org_names)/2 + 0.5) * width
+                ax.bar(x_pos + offset, y_vals, width, label=org, edgecolor='black', color=colors[i % len(colors)])
+            ax.set_title(title, fontweight='bold')
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(all_cats, rotation=45, ha='right')
+            if y_format: ax.yaxis.set_major_formatter(ticker.StrMethodFormatter(y_format))
+            ax.legend()
+
+        plot_grouped_bars(ax_scores, org_data, 'Scores', 'Sustainability Model Scores')
+        ax_scores.set_ylim(0, 1.1)
+        plot_grouped_bars(ax_affil, org_data, 'Affiliation', 'Emissions by Affiliation', '{x:,.0f} kg')
+        plot_grouped_bars(ax_cat_dist, org_data, 'Dist_Cat', 'Distance (Km) by Category', '{x:,.0f}')
+        plot_grouped_bars(ax_cat_emiss, org_data, 'Emiss_Cat', 'Emissions by Category', '{x:,.0f} kg')
+        
+        fig.suptitle(f'Strategic Cross-Institutional Dashboard - {self.year}', fontsize=18, fontweight='bold')
+        pdf_path = os.path.join(self.monthly_reports_folder, f"full_institutional_comparison_{self.year}.pdf")
+        fig.savefig(pdf_path, bbox_inches='tight', facecolor='white')
+        plt.close(fig)
+        print(f"   ✅ Full Comparison Dashboard saved at: {pdf_path}")
+
+        # ==========================================
+        # 2. GERAÇÃO DA PLANILHA EXCEL
+        # ==========================================
+        excel_path = os.path.join(self.monthly_reports_folder, f"institutional_comparison_data_{self.year}.xlsx")
+        
+        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+            # Aba 1: Resumo de Custos e Emissões
+            df_summary = pd.DataFrame({
+                'Institution': org_names,
+                'Expenses (2025 BRL)': costs,
+                'Emissions (KgCO2eq)': emissions
+            })
+            df_summary.to_excel(writer, sheet_name='Summary', index=False)
+            
+            # Aba 2: Scores do Modelo
+            scores_data = [{'Institution': org, **org_data[org]['Scores']} for org in org_names]
+            pd.DataFrame(scores_data).fillna(0).to_excel(writer, sheet_name='Scores', index=False)
+            
+            # Aba 3: Emissões por Vínculo
+            affil_data = [{'Institution': org, **org_data[org]['Affiliation']} for org in org_names]
+            pd.DataFrame(affil_data).fillna(0).to_excel(writer, sheet_name='Emissions_by_Affiliation', index=False)
+            
+            # Aba 4: Distância por Categoria
+            dist_data = [{'Institution': org, **org_data[org]['Dist_Cat']} for org in org_names]
+            pd.DataFrame(dist_data).fillna(0).to_excel(writer, sheet_name='Distance_by_Category', index=False)
+            
+            # Aba 5: Emissões por Categoria
+            emiss_cat_data = [{'Institution': org, **org_data[org]['Emiss_Cat']} for org in org_names]
+            pd.DataFrame(emiss_cat_data).fillna(0).to_excel(writer, sheet_name='Emissions_by_Category', index=False)
+
+        print(f"   📊 Comparison Data Spreadsheet saved at: {excel_path}")
